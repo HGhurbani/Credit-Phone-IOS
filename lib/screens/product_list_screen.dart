@@ -1,0 +1,270 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../models/product.dart';
+import '../services/api_service.dart';
+import '../widgets/product_card.dart';
+import '../providers/locale_provider.dart';
+
+class ProductListScreen extends StatefulWidget {
+  final int? categoryId;
+  final String? sortBy; // ← أضفنا هذا السطر لدعم الفرز
+  final String? initialQuery;
+  final String? titleAr;
+  final String? titleEn;
+  final String? searchHintAr;
+  final String? searchHintEn;
+  final String? noResultsTextAr;
+  final String? noResultsTextEn;
+
+  const ProductListScreen({
+    Key? key,
+    this.categoryId,
+    this.sortBy,
+    this.initialQuery,
+    this.titleAr,
+    this.titleEn,
+    this.searchHintAr,
+    this.searchHintEn,
+    this.noResultsTextAr,
+    this.noResultsTextEn,
+  }) : super(key: key);
+
+  @override
+  State<ProductListScreen> createState() => _ProductListScreenState();
+}
+
+class _ProductListScreenState extends State<ProductListScreen> {
+  final apiService = ApiService();
+  final _scrollController = ScrollController();
+  final _searchController = TextEditingController();
+  Timer? _searchDebounce;
+
+  List<Product> _allProducts = [];
+  List<Product> _filteredProducts = [];
+  int _page = 1;
+  int _perPage = 12; // زيادة العدد لتقليل حالات الصفحة الفارغة بعد الفلترة
+  bool _isLoading = true;
+  bool _isLoadingMore = false;
+  bool _hasMore = true;
+  int _activeRequestId = 0;
+
+  String _language = "ar";
+  String _currentQuery = "";
+
+  @override
+  void initState() {
+    super.initState();
+    final locale = Provider.of<LocaleProvider>(context, listen: false).locale;
+    _language = locale.languageCode;
+    if (widget.initialQuery != null && widget.initialQuery!.isNotEmpty) {
+      _searchController.text = widget.initialQuery!;
+    }
+    _currentQuery = _searchController.text.trim();
+
+    _fetchProducts();
+
+    _scrollController.addListener(() {
+      if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200 &&
+          !_isLoadingMore && _hasMore) {
+        _fetchMoreProducts();
+      }
+    });
+  }
+
+  Future<void> _fetchProducts() async {
+    final requestId = ++_activeRequestId;
+
+    setState(() {
+      _isLoading = true;
+      _page = 1;
+      _hasMore = true;
+      _allProducts = [];
+      _filteredProducts = [];
+      _isLoadingMore = false;
+    });
+
+    try {
+      final products = await apiService.getProducts(
+        categoryId: widget.categoryId,
+        language: _language,
+        perPage: _perPage,
+        page: _page,
+        searchQuery: _currentQuery,
+      );
+
+      if (!mounted || requestId != _activeRequestId) {
+        if (mounted && _isLoadingMore) {
+          setState(() => _isLoadingMore = false);
+        }
+        return;
+      }
+
+      final sorted = _applySorting(products);
+      setState(() {
+        _allProducts = sorted;
+        _filteredProducts = sorted;
+        _hasMore = products.length == _perPage;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted || requestId != _activeRequestId) return;
+      setState(() {
+        _isLoading = false;
+        _isLoadingMore = false;
+        _hasMore = false;
+      });
+    }
+  }
+
+  Future<void> _fetchMoreProducts() async {
+    if (_isLoadingMore) return;
+    if (!mounted) return;
+    final requestId = _activeRequestId;
+    setState(() => _isLoadingMore = true);
+    _page++;
+
+    try {
+      final more = await apiService.getProducts(
+        categoryId: widget.categoryId,
+        language: _language,
+        perPage: _perPage,
+        page: _page,
+        searchQuery: _currentQuery,
+      );
+
+      if (!mounted || requestId != _activeRequestId) {
+        if (mounted) {
+          setState(() => _isLoadingMore = false);
+        }
+        return;
+      }
+
+      if (more.isNotEmpty) {
+        final sorted = _applySorting(more);
+
+        if (mounted) {
+          setState(() {
+            _allProducts.addAll(sorted);
+            _applySorting(_allProducts);
+            _filteredProducts = _allProducts;
+            _hasMore = more.length == _perPage;
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() => _hasMore = false);
+        }
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _hasMore = false);
+      }
+    }
+
+    if (mounted) {
+      setState(() => _isLoadingMore = false);
+    }
+  }
+
+  List<Product> _applySorting(List<Product> products) {
+    if (widget.sortBy == 'price_asc') {
+      products.sort((a, b) => a.price.compareTo(b.price));
+    }
+    // يمكنك لاحقاً إضافة دعم لمزيد من الفرز مثل: 'price_desc' أو 'name_asc'
+    return products;
+  }
+
+  void _onSearchChanged(String query) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 350), () {
+      final normalizedQuery = query.trim();
+      if (!mounted || normalizedQuery == _currentQuery) return;
+      _currentQuery = normalizedQuery;
+      _fetchProducts();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isAr = _language == 'ar';
+    final appBarTitle = isAr
+        ? (widget.titleAr ?? "المنتجات")
+        : (widget.titleEn ?? "Products");
+    final searchHint = isAr
+        ? (widget.searchHintAr ?? "ابحث عن منتج...")
+        : (widget.searchHintEn ?? "Search for product...");
+    final noResults = isAr
+        ? (widget.noResultsTextAr ?? "لا توجد نتائج")
+        : (widget.noResultsTextEn ?? "No results found");
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(appBarTitle),
+        centerTitle: true,
+        backgroundColor: const Color(0xFF1A2543),
+        foregroundColor: Colors.white,
+        elevation: 0,
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: TextField(
+              controller: _searchController,
+              onChanged: _onSearchChanged,
+              decoration: InputDecoration(
+                hintText: searchHint,
+                prefixIcon: const Icon(Icons.search),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                filled: true,
+                fillColor: Colors.grey[200],
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _filteredProducts.isEmpty
+                ? (_isLoadingMore && _hasMore)
+                    ? const Center(child: CircularProgressIndicator())
+                    : Center(child: Text(noResults))
+                : NotificationListener<ScrollNotification>(
+              onNotification: (_) => true,
+              child: GridView.builder(
+                controller: _scrollController,
+                padding: const EdgeInsets.all(10),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                  childAspectRatio: 0.6,
+                ),
+                itemCount: _filteredProducts.length + (_hasMore ? 1 : 0),
+                itemBuilder: (context, index) {
+                  if (index == _filteredProducts.length) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  return ProductCard(product: _filteredProducts[index]);
+                },
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _scrollController.dispose();
+    _searchController.dispose();
+    super.dispose();
+  }
+}

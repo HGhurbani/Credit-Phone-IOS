@@ -1,0 +1,1535 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import '../providers/locale_provider.dart';
+import '../providers/user_provider.dart';
+import '../services/notification_service.dart';
+import '../widgets/home_card_category.dart';
+import '../services/api_service.dart';
+import '../models/category.dart';
+import '../models/product.dart';
+import '../widgets/product_card.dart';
+import 'categories_screen.dart';
+import 'product_list_screen.dart';
+import 'package:carousel_slider/carousel_slider.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({Key? key}) : super(key: key);
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen>
+    with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+  final apiService = ApiService();
+  Future<List<Category>> _futureCategories = Future.value(const []);
+  final Map<int, Future<List<Product>>> _futureProductsByCategory = {};
+  late String _activeLanguage;
+  final ValueNotifier<int> _notificationCount = ValueNotifier<int>(0);
+  late final LocaleProvider _localeProvider;
+  late final UserProvider _userProvider;
+  StreamSubscription<int>? _notificationSubscription;
+
+  late AnimationController _welcomeAnimationController;
+  late Animation<double> _welcomeAnimation;
+  late AnimationController _sectionsAnimationController;
+  late Animation<double> _sectionsAnimation;
+
+  bool _showWelcomeMessage = true;
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _localeProvider = Provider.of<LocaleProvider>(context, listen: false);
+    _userProvider = Provider.of<UserProvider>(context, listen: false);
+    _activeLanguage = _localeProvider.locale.languageCode;
+
+    _userProvider.addListener(_handleUserChanged);
+    _welcomeAnimationController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    );
+    _welcomeAnimation = CurvedAnimation(
+      parent: _welcomeAnimationController,
+      curve: Curves.easeOutBack,
+    );
+
+    _sectionsAnimationController = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    );
+    _sectionsAnimation = CurvedAnimation(
+      parent: _sectionsAnimationController,
+      curve: Curves.easeOutCubic,
+    );
+
+    _futureCategories = apiService.getCategories(language: _activeLanguage);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      await _updateNotificationSubscription();
+      _startAnimations();
+      await _checkFirstTime(); // ← اجعلها async
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final lang = Localizations.localeOf(context).languageCode;
+    if (lang != _activeLanguage) {
+      _resetHomeData(lang);
+    }
+  }
+
+  void _resetHomeData(String language) {
+    if (!mounted) return;
+    setState(() {
+      _activeLanguage = language;
+      _futureCategories = apiService.getCategories(language: language);
+      _futureProductsByCategory.clear();
+    });
+  }
+
+
+  void _startAnimations() {
+    _welcomeAnimationController.forward();
+    Future.delayed(const Duration(milliseconds: 500), () {
+      _sectionsAnimationController.forward();
+    });
+  }
+
+  Future<void> _checkFirstTime() async {
+    final prefs = await SharedPreferences.getInstance();
+    final hasSeenWelcome = prefs.getBool('hasSeenWelcome') ?? false;
+
+    if (!hasSeenWelcome) {
+      // أظهر الرسالة الآن
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) {
+          setState(() {
+            _showWelcomeMessage = false;
+          });
+        }
+      });
+
+      // خزّن الحالة حتى لا تظهر مرة أخرى
+      await prefs.setBool('hasSeenWelcome', true);
+    } else {
+      // لا تظهر الرسالة
+      setState(() {
+        _showWelcomeMessage = false;
+      });
+    }
+  }
+
+
+  @override
+  void dispose() {
+    _userProvider.removeListener(_handleUserChanged);
+    _cancelNotificationSubscription(resetCount: false);
+    _welcomeAnimationController.dispose();
+    _sectionsAnimationController.dispose();
+    _scrollController.dispose();
+    _notificationCount.dispose();
+    super.dispose();
+  }
+
+  void _handleUserChanged() {
+    _updateNotificationSubscription();
+  }
+
+  Future<void> _updateNotificationSubscription() async {
+    final userEmail = _userProvider.user?.email;
+    if (userEmail == null || userEmail.isEmpty) {
+      _cancelNotificationSubscription();
+      return;
+    }
+
+    final service = NotificationService.instance;
+    final notificationsEnabled = await service.getNotificationsEnabled();
+    if (!notificationsEnabled) {
+      _cancelNotificationSubscription();
+      return;
+    }
+
+    if (_notificationSubscription != null) {
+      await service.refreshUnreadCount();
+      return;
+    }
+
+    final count = await service.getUnreadCount();
+    if (!mounted) return;
+    _notificationCount.value = count;
+    if (_notificationSubscription == null) {
+      _notificationSubscription = _startNotificationListener(service);
+    }
+    await service.refreshUnreadCount();
+  }
+
+  void _cancelNotificationSubscription({bool resetCount = true}) {
+    _notificationSubscription?.cancel();
+    _notificationSubscription = null;
+    if (resetCount && mounted) {
+      _notificationCount.value = 0;
+    }
+  }
+
+  StreamSubscription<int>? _startNotificationListener(NotificationService service) {
+    return service.unreadCountStream.listen((count) {
+      if (!mounted) return;
+      _notificationCount.value = count;
+    });
+  }
+
+  void _loadData(String language) {
+    _resetHomeData(language);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final localeProvider = Provider.of<LocaleProvider>(context);
+    final userProvider = Provider.of<UserProvider>(context);
+    final currentLanguage = localeProvider.locale.languageCode;
+    final direction = currentLanguage == "ar" ? TextDirection.rtl : TextDirection.ltr;
+
+    return Directionality(
+      textDirection: direction,
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF9F9F9),
+        body: Stack(
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildAppBar(),
+                Expanded(
+                  child: RefreshIndicator(
+                    onRefresh: () async {
+                      _loadData(currentLanguage);
+                      HapticFeedback.lightImpact();
+                    },
+                    color: const Color(0xFF6FE0DA),
+                    child: SingleChildScrollView(
+                      controller: _scrollController,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      child: AnimatedBuilder(
+                        animation: _sectionsAnimation,
+                        builder: (context, child) {
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const SizedBox(height: 16),
+                              _buildPersonalizedWelcome(currentLanguage, userProvider),
+                              const SizedBox(height: 8),
+                              _buildQuickStats(currentLanguage),
+                              const SizedBox(height: 16),
+                              Transform.translate(
+                                offset: Offset(0, 50 * (1 - _sectionsAnimation.value)),
+                                child: Opacity(
+                                  opacity: _sectionsAnimation.value,
+                                  child: _buildBannerSlider(currentLanguage),
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              _buildCatalogSearchBar(currentLanguage == "ar"),
+                              const SizedBox(height: 16),
+                              Transform.translate(
+                                offset: Offset(0, 30 * (1 - _sectionsAnimation.value)),
+                                child: Opacity(
+                                  opacity: _sectionsAnimation.value,
+                                  child: _buildCategoriesWithHeader(currentLanguage),
+                                ),
+                              ),
+                              Transform.translate(
+                                offset: Offset(0, 20 * (1 - _sectionsAnimation.value)),
+                                child: Opacity(
+                                  opacity: _sectionsAnimation.value,
+                                  child: const SizedBox.shrink(),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Transform.translate(
+                                offset: Offset(0, 10 * (1 - _sectionsAnimation.value)),
+                                child: Opacity(
+                                  opacity: _sectionsAnimation.value,
+                                  child: _buildCategorySections(
+                                    currentLanguage: currentLanguage,
+                                    moreLabel: currentLanguage == "ar" ? "المزيد" : "More",
+                                    noProductsForCategoryText: currentLanguage == "ar"
+                                        ? "لا توجد منتجات لهذا التصنيف"
+                                        : "No products for this category",
+                                  ),
+                                ),
+                              ),
+                              _buildQuickHelpSection(currentLanguage),
+                              const SizedBox(height: 100),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            // رسالة الترحيب المنبثقة
+            if (_showWelcomeMessage) _buildWelcomeOverlay(currentLanguage),
+            // زر العودة إلى الأعلى
+            _buildScrollToTopButton(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPersonalizedWelcome(String currentLanguage, UserProvider userProvider) {
+    final user = userProvider.user;
+    final greeting = _getTimeBasedGreeting(currentLanguage);
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            const Color(0xFF6FE0DA).withOpacity(0.1),
+            Colors.white.withOpacity(0.8),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFF6FE0DA).withOpacity(0.2),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF6FE0DA).withOpacity(0.2),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              _getTimeBasedIcon(),
+              color: const Color(0xFF1A2543),
+              size: 24,
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  greeting,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1A2543),
+                  ),
+                ),
+                if (user != null)
+                  Text(
+                    user.username,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: const Color(0xFF1A2543).withOpacity(0.7),
+                    ),
+                  ),
+                Text(
+                  currentLanguage == "ar"
+                      ? "اكتشف أحدث المنتجات في كريدت فون"
+                      : "Discover the latest products",
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: const Color(0xFF1A2543).withOpacity(0.6),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getTimeBasedGreeting(String language) {
+    final hour = DateTime.now().hour;
+    if (language == "ar") {
+      if (hour < 12) return "صباح الخير";
+      if (hour < 17) return "مساء الخير";
+      return "مساء الخير";
+    } else {
+      if (hour < 12) return "Good Morning";
+      if (hour < 17) return "Good Afternoon";
+      return "Good Evening";
+    }
+  }
+
+  IconData _getTimeBasedIcon() {
+    final hour = DateTime.now().hour;
+    if (hour < 12) return Icons.wb_sunny_rounded;
+    if (hour < 17) return Icons.wb_cloudy_rounded;
+    return Icons.brightness_3_rounded;
+  }
+
+  Widget _buildQuickStats(String currentLanguage) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildStatCard(
+              icon: Icons.support_agent_rounded,
+              title: currentLanguage == "ar" ? "اطلب منتجك" : "Request Product",
+              subtitle: currentLanguage == "ar"
+                  ? "أرسل طلبك وسنتواصل معك"
+                  : "Submit a request and we will contact you",
+              color: const Color(0xFF6FE0DA),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: _buildStatCard(
+              icon: Icons.flash_on_rounded,
+              title: currentLanguage == "ar" ? "تسليم سريع" : "Fast Delivery",
+              subtitle: currentLanguage == "ar" ? "خلال 24 ساعة" : "Within 24hrs",
+              color: const Color(0xFF1A2543),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: color.withOpacity(0.2),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 28),
+          const SizedBox(height: 8),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          Text(
+            subtitle,
+            style: TextStyle(
+              fontSize: 10,
+              color: color.withOpacity(0.7),
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWelcomeOverlay(String currentLanguage) {
+    return AnimatedBuilder(
+      animation: _welcomeAnimation,
+      builder: (context, child) {
+        return Container(
+          color: Colors.black.withOpacity(0.3 * _welcomeAnimation.value),
+          child: Center(
+            child: Transform.scale(
+              scale: _welcomeAnimation.value,
+              child: Container(
+                margin: const EdgeInsets.all(32),
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 20,
+                      spreadRadius: 5,
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF6FE0DA).withOpacity(0.2),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.celebration_rounded,
+                        color: Color(0xFF1A2543),
+                        size: 40,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      currentLanguage == "ar"
+                          ? "مرحباً بك!"
+                          : "Welcome!",
+                      style: const TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1A2543),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      currentLanguage == "ar"
+                          ? "اكتشف مجموعة واسعة من المنتجات الإلكترونية بأفضل الأسعار"
+                          : "Discover a wide range of electronic products at the best prices",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: const Color(0xFF1A2543).withOpacity(0.7),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildScrollToTopButton() {
+    return Positioned(
+      bottom: 20,
+      right: 20,
+      child: AnimatedBuilder(
+        animation: _scrollController,
+        builder: (context, child) {
+          final showButton = _scrollController.hasClients &&
+              _scrollController.offset > 300;
+
+          return AnimatedOpacity(
+            opacity: showButton ? 1.0 : 0.0,
+            duration: const Duration(milliseconds: 300),
+            child: AnimatedScale(
+              scale: showButton ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 300),
+              child: FloatingActionButton.small(
+                onPressed: () {
+                  _scrollController.animateTo(
+                    0,
+                    duration: const Duration(milliseconds: 500),
+                    curve: Curves.easeInOut,
+                  );
+                  HapticFeedback.lightImpact();
+                },
+                backgroundColor: const Color(0xFF6FE0DA),
+                child: const Icon(
+                  Icons.keyboard_arrow_up_rounded,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildQuickHelpSection(String currentLanguage) {
+    return Container(
+      margin: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            const Color(0xFF1A2543),
+            const Color(0xFF1A2543).withOpacity(0.8),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  currentLanguage == "ar"
+                      ? "تحتاج مساعدة؟"
+                      : "Need Help?",
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  currentLanguage == "ar"
+                      ? "تواصل معنا عبر الواتساب"
+                      : "Contact us via WhatsApp",
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.white.withOpacity(0.8),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              final currentLanguage =
+                  Provider.of<LocaleProvider>(context, listen: false)
+                      .locale
+                      .languageCode;
+              final isAr = currentLanguage == "ar";
+              showModalBottomSheet(
+                context: context,
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                builder: (context) {
+                  Widget option({
+                    required String label,
+                    required String number,
+                    required String waNumber,
+                  }) {
+                    return ListTile(
+                      leading: Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.green.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(Icons.phone_android_rounded,
+                            color: Colors.green),
+                      ),
+                      title: Text(
+                        label,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF1A2543),
+                        ),
+                      ),
+                      subtitle: Text(
+                        number,
+                        style: TextStyle(color: Colors.grey.shade700),
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _openWhatsApp(waNumber);
+                      },
+                    );
+                  }
+
+                  return SafeArea(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 12),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 40,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade300,
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            isAr ? "تواصل معنا" : "Contact us",
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF1A2543),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          option(
+                            label: isAr ? "خدمة العملاء" : "Customer service",
+                            number: "50105685",
+                            waNumber: "97450105685",
+                          ),
+                          option(
+                            label: isAr
+                                ? "الاستفسار والطلب والمبيعات"
+                                : "Inquiries, orders & sales",
+                            number: "77704313",
+                            waNumber: "97477704313",
+                          ),
+                          option(
+                            label: isAr
+                                ? "الاستفسار والطلب والمبيعات"
+                                : "Inquiries, orders & sales",
+                            number: "71727771",
+                            waNumber: "97471727771",
+                          ),
+                          const SizedBox(height: 8),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF6FE0DA),
+              foregroundColor: const Color(0xFF1A2543),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            icon: const Icon(Icons.chat_rounded, size: 20,color: Color(0xFF1A2543)),
+            label: Text(
+              currentLanguage == "ar" ? "تواصل" : "Contact",
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCategoriesWithHeader(String currentLanguage) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF6FE0DA).withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.category_rounded,
+                  color: Color(0xFF1A2543),
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                currentLanguage == "ar" ? "التصنيفات" : "Categories",
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF1A2543),
+                ),
+              ),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const CategoriesScreen(),
+                    ),
+                  );
+                },
+                icon: const Icon(
+                  Icons.grid_view_rounded,
+                  size: 16,
+                  color: Color(0xFF6FE0DA),
+                ),
+                label: Text(
+                  currentLanguage == "ar" ? "عرض الكل" : "View All",
+                  style: const TextStyle(
+                    color: Color(0xFF6FE0DA),
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        _buildCategoriesSection(
+          currentLanguage: currentLanguage,
+          noCategoriesText: currentLanguage == "ar" ? "لا توجد تصنيفات" : "No categories",
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCatalogSearchBar(bool isArabic) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: TextField(
+        readOnly: true,
+        onTap: () => _showSearchDialog(isArabic),
+        decoration: InputDecoration(
+          hintText: isArabic ? 'ابحث عن المنتجات...' : 'Search products...',
+          prefixIcon: const Icon(Icons.search),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          filled: true,
+          fillColor: Colors.grey[200],
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showSearchDialog(bool isArabic) async {
+    final controller = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(isArabic ? 'ابحث' : 'Search'),
+          content: TextField(
+            controller: controller,
+            decoration: InputDecoration(
+              hintText: isArabic ? 'اكتب اسم المنتج' : 'Type product name',
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(isArabic ? 'إلغاء' : 'Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final query = controller.text.trim();
+                Navigator.pop(context);
+                if (query.isNotEmpty) {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ProductListScreen(
+                        initialQuery: query,
+                        titleAr: 'نتائج البحث',
+                        titleEn: 'Search Results',
+                        searchHintAr: 'ابحث عن المنتجات...',
+                        searchHintEn: 'Search products...',
+                      ),
+                    ),
+                  );
+                }
+              },
+              child: Text(isArabic ? 'بحث' : 'Search'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildAppBar() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1A2543), Color(0xFF1A2543)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Container(
+          height: 65,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              _buildIconWithBackground(Icons.menu, () {
+                Scaffold.of(context).openDrawer();
+              }),
+              Hero(
+                tag: 'app_logo',
+                child: Image.asset('assets/images/logo.png', height: 80),
+              ),
+              _buildNotificationIcon(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIconWithBackground(IconData icon, VoidCallback onTap) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          onTap();
+          HapticFeedback.lightImpact();
+        },
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: const Color(0x206FE0DA),
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: const Color(0xFF6FE0DA).withOpacity(0.3),
+              width: 1,
+            ),
+          ),
+          child: Icon(icon, color: const Color(0xFF6FE0DA)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNotificationIcon() {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        _buildIconWithBackground(Icons.notifications, () {
+          Navigator.pushNamed(context, '/notifications').then((_) async {
+            final count = await NotificationService.instance.getUnreadCount();
+            if (!mounted) return;
+            _notificationCount.value = count;
+          });
+          NotificationService.instance.markAllAsRead();
+          if (mounted) {
+            _notificationCount.value = 0;
+          }
+        }),
+        Positioned(
+          right: 0,
+          top: 0,
+          child: ValueListenableBuilder<int>(
+            valueListenable: _notificationCount,
+            builder: (context, count, _) {
+              if (count == 0) return const SizedBox();
+
+              return Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Colors.red, Colors.redAccent],
+                  ),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.red.withOpacity(0.3),
+                      blurRadius: 4,
+                    ),
+                  ],
+                ),
+                constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+                child: Center(
+                  child: Text(
+                    '$count',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildBannerSlider(String language) {
+    final isArabic = language == 'ar';
+
+    final List<Map<String, dynamic>> slides = [
+      {
+        'title': isArabic ? "كتالوج المنتجات" : "CreditPhone",
+        'subtitle': isArabic ? "تصفح الجوالات والأجهزة الإلكترونية واطلب المنتج المناسب لك"
+            : "Browse mobiles and electronics and request the product you need",
+        'icon': Icons.phone_iphone_rounded,
+        'gradient': [const Color(0xFF192544), const Color(0xFF6FE0DA)],
+        'action': isArabic ? "تسوق الآن" : "Shop Now",
+      },
+      {
+        'title': isArabic ? "إرسال طلب المنتج" : "Submit Product Request",
+        'subtitle': isArabic ? "سيتواصل معك فريقنا لتأكيد توفر المنتج وتفاصيل الطلب"
+            : "Our team will contact you to confirm availability and order details",
+        'icon': Icons.assignment_turned_in_rounded,
+        'gradient': [const Color(0xFF6FE0DA), const Color(0xFF192544)],
+        'action': isArabic ? "اعرف المزيد" : "Learn More",
+      },
+      {
+        'title': isArabic ? "الدفع عند الاستلام" : "Pay on delivery",
+        'subtitle': isArabic ? "استلم منتجك أولاً ثم ادفع بكل ثقة وأمان"
+            : "Receive your product first then pay with confidence",
+        'icon': Icons.local_shipping_rounded,
+        'gradient': [const Color(0xFF192544), const Color(0xFF6FE0DA).withOpacity(0.8)],
+        'action': isArabic ? "اطلب الآن" : "Order Now",
+      },
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 5.0, vertical: 12.0),
+      child: CarouselSlider(
+        options: CarouselOptions(
+          height: 159.0,
+          autoPlay: true,
+          enlargeCenterPage: true,
+          autoPlayInterval: const Duration(seconds: 6),
+          autoPlayAnimationDuration: const Duration(milliseconds: 1000),
+          autoPlayCurve: Curves.easeInOutCirc,
+          pauseAutoPlayOnTouch: true,
+          viewportFraction: 0.93,
+        ),
+        items: slides.map((slide) {
+          return Builder(
+            builder: (BuildContext context) {
+              return Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: slide['gradient'],
+                  ),
+                  borderRadius: BorderRadius.circular(22.0),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Stack(
+                  children: [
+                    Positioned(
+                      right: -20,
+                      bottom: -20,
+                      child: Opacity(
+                        opacity: 0.08,
+                        child: Icon(
+                          slide['icon'],
+                          size: 120.0,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                    Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(22.0),
+                        onTap: () {
+                          HapticFeedback.selectionClick();
+                        },
+                        splashColor: Colors.white.withOpacity(0.2),
+                        highlightColor: Colors.white.withOpacity(0.1),
+                        child: Padding(
+                          padding: const EdgeInsets.all(24.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.2),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: Colors.white.withOpacity(0.4),
+                                        width: 2.0,
+                                      ),
+                                    ),
+                                    padding: const EdgeInsets.all(16.0),
+                                    child: Icon(
+                                      slide['icon'],
+                                      size: 30.0,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 24.0),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          slide['title'],
+                                          style: const TextStyle(
+                                            fontSize: 16.0,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.white,
+                                            height: 1.3,
+                                            letterSpacing: 0.5,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          slide['subtitle'],
+                                          style: TextStyle(
+                                            fontSize: 13.0,
+                                            fontWeight: FontWeight.w400,
+                                            color: Colors.white.withOpacity(0.9),
+                                            height: 1.4,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildCategoriesSection({required String currentLanguage, required String noCategoriesText}) {
+    return FutureBuilder<List<Category>>(
+      future: _futureCategories,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return SizedBox(
+            height: 140,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              itemCount: 6,
+              itemBuilder: (context, index) {
+                return Container(
+                  width: 100,
+                  margin: const EdgeInsets.symmetric(horizontal: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Center(
+                    child: CircularProgressIndicator.adaptive(),
+                  ),
+                );
+              },
+            ),
+          );
+        }
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return Container(
+            height: 100,
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+            decoration: BoxDecoration(
+              color: Colors.grey.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: Colors.grey.withOpacity(0.2),
+              ),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.category_outlined,
+                    color: Colors.grey.withOpacity(0.5),
+                    size: 32,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    noCategoriesText,
+                    style: TextStyle(
+                      color: Colors.grey.withOpacity(0.7),
+                      fontSize: 14,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        final categories = snapshot.data!;
+        return SizedBox(
+          height: 140,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            itemCount: categories.length,
+            itemBuilder: (context, index) {
+              return HomeCategoryCard(category: categories[index]);
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildCategorySections({required String currentLanguage, required String moreLabel, required String noProductsForCategoryText}) {
+    return FutureBuilder<List<Category>>(
+      future: _futureCategories,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return Column(
+            children: List.generate(2, (index) => _buildLoadingCategorySection()),
+          );
+        }
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return Container(
+            height: 200,
+            margin: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.grey.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.inventory_2_outlined,
+                    color: Colors.grey.withOpacity(0.5),
+                    size: 48,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    noProductsForCategoryText,
+                    style: TextStyle(
+                      color: Colors.grey.withOpacity(0.7),
+                      fontSize: 16,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        final categories = snapshot.data!;
+        return Column(
+          children: categories
+              .map(
+                (category) => _buildCategorySection(
+                  category,
+                  moreLabel: moreLabel,
+                  currentLanguage: currentLanguage,
+                ),
+              )
+              .toList(),
+        );
+      },
+    );
+  }
+
+  Widget _buildLoadingCategorySection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16.0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Container(
+                width: 120,
+                height: 20,
+                decoration: BoxDecoration(
+                  color: Colors.grey.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              Container(
+                width: 60,
+                height: 16,
+                decoration: BoxDecoration(
+                  color: Colors.grey.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: 290,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            itemCount: 4,
+            itemBuilder: (context, index) {
+              return Container(
+                width: 160,
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                decoration: BoxDecoration(
+                  color: Colors.grey.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCategorySection(Category category,
+      {required String currentLanguage, required String moreLabel}) {
+    final future = _futureProductsByCategory.putIfAbsent(
+      category.id,
+      () => apiService.getProducts(
+        categoryId: category.id,
+        language: currentLanguage,
+        perPage: 10,
+      ),
+    );
+
+    return FutureBuilder<List<Product>>(
+      future: future,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return const SizedBox.shrink();
+        }
+
+        final isWaiting = snapshot.connectionState == ConnectionState.waiting;
+        final products = snapshot.data ?? const <Product>[];
+
+        if (!isWaiting && products.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        Widget buildHeader() {
+          return Container(
+            margin: const EdgeInsets.symmetric(horizontal: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 15),
+            decoration: BoxDecoration(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    const SizedBox(width: 12),
+                    Text(
+                      category.name,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1A2543),
+                      ),
+                    ),
+                  ],
+                ),
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => ProductListScreen(
+                            categoryId: category.id,
+                          ),
+                        ),
+                      );
+                      HapticFeedback.lightImpact();
+                    },
+                    borderRadius: BorderRadius.circular(20),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF6FE0DA).withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: const Color(0xFF6FE0DA).withOpacity(0.3),
+                          width: 1,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            moreLabel.replaceAll('>', '').trim(),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF6FE0DA),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          const Icon(
+                            Icons.arrow_forward_ios,
+                            size: 12,
+                            color: Color(0xFF6FE0DA),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+
+        Widget buildSkeleton() {
+          return SizedBox(
+            height: 290,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              itemCount: 4,
+              itemBuilder: (context, index) {
+                return Container(
+                  width: 160,
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Center(
+                    child: CircularProgressIndicator.adaptive(),
+                  ),
+                );
+              },
+            ),
+          );
+        }
+
+        Widget buildProducts(List<Product> products) {
+          if (products.isEmpty) {
+            return const SizedBox.shrink();
+          }
+
+          if (products.length == 1) {
+            final product = products.first;
+            return SizedBox(
+              height: 290,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: ProductCard(product: product),
+              ),
+            );
+          }
+
+          if (products.length == 2) {
+            return SizedBox(
+              height: 290,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  children: List.generate(products.length * 2 - 1, (index) {
+                    if (index.isOdd) {
+                      return const SizedBox(width: 12);
+                    }
+                    final productIndex = index ~/ 2;
+                    return Expanded(
+                      child: ProductCard(product: products[productIndex]),
+                    );
+                  }),
+                ),
+              ),
+            );
+          }
+
+          return SizedBox(
+            height: 290,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              itemCount: products.length,
+              itemBuilder: (context, index) {
+                return SizedBox(
+                  width: 160,
+                  child: ProductCard(product: products[index]),
+                );
+              },
+            ),
+          );
+        }
+
+        final body = isWaiting ? buildSkeleton() : buildProducts(products);
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              buildHeader(),
+              const SizedBox(height: 12),
+              body,
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _openWhatsApp(String phoneNumber) async {
+    final url = "https://wa.me/$phoneNumber";
+    try {
+      if (await canLaunchUrl(Uri.parse(url))) {
+        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+        HapticFeedback.lightImpact();
+      }
+    } catch (e) {
+      // Handle error gracefully
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              Provider.of<LocaleProvider>(context, listen: false).locale.languageCode == "ar"
+                  ? "حدث خطأ في فتح الواتساب"
+                  : "Error opening WhatsApp",
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+}

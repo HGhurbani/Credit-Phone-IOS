@@ -1,0 +1,139 @@
+// lib/providers/user_provider.dart
+
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../models/user.dart';
+import '../services/api_service.dart';
+import '../services/notification_service.dart';
+
+class UserProvider extends ChangeNotifier {
+  UserProvider({NotificationService? notificationService})
+      : _notificationService = notificationService ?? NotificationService.instance;
+
+  final NotificationService _notificationService;
+  User? _user;
+
+  User? get user => _user;
+
+  bool get isLoggedIn => _user != null;
+
+  Future<void> setUser(User newUser) async {
+    final prefs = await SharedPreferences.getInstance();
+    final int? persistedId =
+        newUser.id ?? prefs.getInt('user_id') ?? _user?.id;
+    final userWithId = (persistedId != null && newUser.id != persistedId)
+        ? newUser.copyWith(id: persistedId)
+        : newUser;
+
+    _user = userWithId;
+    notifyListeners();
+
+    if (userWithId.id != null) {
+      await prefs.setInt('user_id', userWithId.id!);
+    } else {
+      await prefs.remove('user_id');
+    }
+    await prefs.setString('user_token', userWithId.token);
+    await prefs.setString('user_name', userWithId.username);
+    await prefs.setString('user_email', userWithId.email);
+    await prefs.setString('user_phone', userWithId.phone); // ✅ احفظ رقم الهاتف
+  }
+
+  Future<void> loadUserFromPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('user_token');
+    final username = prefs.getString('user_name');
+    final email = prefs.getString('user_email');
+    final phone = prefs.getString('user_phone');
+    final userId = prefs.getInt('user_id');
+
+
+    if (token != null && username != null && email != null) {
+      final restoredUser = User(
+        id: userId,
+        token: token,
+        username: username,
+        email: email,
+        phone: phone ?? '',
+      );
+      await setUser(restoredUser);
+    }
+  }
+  Future<void> logout() async {
+    final email = _user?.email;
+    await _notificationService.logoutCleanup(email: email);
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('user_id');
+    await prefs.remove('user_token');
+    await prefs.remove('user_name');
+    await prefs.remove('user_email');
+    await prefs.remove('user_phone');
+    await prefs.remove('saved_username');
+    await prefs.remove('remember_me');
+    await prefs.remove('last_route');
+
+    _user = null;
+    notifyListeners();
+  }
+  Future<bool> deleteAccount() async {
+    final prefs = await SharedPreferences.getInstance();
+    int? userId = prefs.getInt('user_id') ?? _user?.id;
+
+    // Fallback: if user_id is missing, try to fetch by email (e.g. when JWT didn't store it)
+    if (userId == null) {
+      final email = _user?.email ?? prefs.getString('user_email');
+      if (email != null && email.isNotEmpty) {
+        try {
+          userId = await ApiService().fetchCustomerIdByEmail(email);
+        } catch (e) {
+          debugPrint('Could not fetch customer ID by email: $e');
+        }
+      }
+    }
+
+    if (userId == null) {
+      debugPrint('No user ID found. Cannot delete.');
+      return false;
+    }
+
+    try {
+      final success = await ApiService().deleteAccount(userId);
+      if (!success) {
+        debugPrint('Failed to delete account from API.');
+        return false;
+      }
+
+      await prefs.clear();
+      _user = null;
+      notifyListeners();
+      return true;
+    } catch (error, stackTrace) {
+      debugPrint('Exception while deleting account: $error');
+      debugPrint(stackTrace.toString());
+      rethrow;
+    }
+  }
+
+  Future<void> updateUser({
+    String? username,
+    String? email,
+    String? phone,
+  }) async {
+    if (_user != null) {
+      _user = _user!.copyWith(
+        username: username ?? _user!.username,
+        email: email ?? _user!.email,
+        phone: phone ?? _user!.phone,
+      );
+
+      final prefs = await SharedPreferences.getInstance();
+      if (username != null) await prefs.setString('user_name', _user!.username);
+      if (email != null) await prefs.setString('user_email', _user!.email);
+      if (phone != null) await prefs.setString('user_phone', _user!.phone);
+
+      notifyListeners();
+    }
+  }
+
+}
