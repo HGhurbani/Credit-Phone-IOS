@@ -33,12 +33,40 @@ workflows:
         script: |
           find . -name "Podfile" -execdir pod install \;
 
+      - name: Read app version from pubspec.yaml
+        script: |
+          PUBSPEC_VERSION="$(python3 - <<'PY'
+          import re, sys
+          p = "pubspec.yaml"
+          try:
+            s = open(p, "r", encoding="utf-8").read()
+          except FileNotFoundError:
+            print(f"ERROR: {p} not found", file=sys.stderr)
+            sys.exit(1)
+          m = re.search(r'(?m)^\s*version\s*:\s*([^\s#]+)\s*$', s)
+          if not m:
+            print("ERROR: pubspec.yaml has no 'version:' field", file=sys.stderr)
+            sys.exit(1)
+          print(m.group(1))
+          PY
+          )"
+
+          BUILD_NAME="${PUBSPEC_VERSION%%+*}"
+          BUILD_NUMBER="${PUBSPEC_VERSION##*+}"
+          if [ "$BUILD_NAME" = "$PUBSPEC_VERSION" ]; then
+            echo "ERROR: pubspec version must include build number like 1.2.3+45 (got: $PUBSPEC_VERSION)"
+            exit 1
+          fi
+
+          echo "Using version from pubspec.yaml: $PUBSPEC_VERSION"
+          echo "BUILD_NAME=$BUILD_NAME"
+          echo "BUILD_NUMBER=$BUILD_NUMBER"
+
       - name: Build iOS IPA with dart-defines
         script: |
-         IOS_BUILD_NUMBER=$((BUILD_NUMBER + 18))
-         echo "Using iOS build number: $IOS_BUILD_NUMBER"
           flutter build ipa --release \
-            --build-number=$PROJECT_BUILD_NUMBER \
+            --build-name="$BUILD_NAME" \
+            --build-number="$BUILD_NUMBER" \
             --dart-define=WOO_CONSUMER_KEY=$WOO_CONSUMER_KEY \
             --dart-define=WOO_CONSUMER_SECRET=$WOO_CONSUMER_SECRET \
             --export-options-plist=/Users/builder/export_options.plist
