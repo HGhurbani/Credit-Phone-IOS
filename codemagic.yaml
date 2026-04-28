@@ -35,6 +35,8 @@ workflows:
 
       - name: Build iOS IPA with dart-defines
         script: |
+         IOS_BUILD_NUMBER=$((BUILD_NUMBER + 18))
+         echo "Using iOS build number: $IOS_BUILD_NUMBER"
           flutter build ipa --release \
             --build-number=$PROJECT_BUILD_NUMBER \
             --dart-define=WOO_CONSUMER_KEY=$WOO_CONSUMER_KEY \
