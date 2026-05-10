@@ -56,8 +56,30 @@ class Product {
   static const int lowStockThreshold = 5;
 
   /// Returns: 'in' | 'low' | 'out'
+  ///
+  /// WooCommerce [stockStatus] is authoritative for in-stock vs out-of-stock.
+  /// [stockQuantity] is used only for the optional low-stock hint when status
+  /// is instock and [manageStock] is true.
   String availabilityKey() {
-    // If quantity is known, it is the most accurate.
+    final status = stockStatus.toLowerCase().trim();
+
+    if (status == 'outofstock') {
+      return 'out';
+    }
+
+    if (status == 'instock' || status == 'onbackorder') {
+      if (status == 'instock' &&
+          manageStock &&
+          stockQuantity != null) {
+        final qty = stockQuantity!;
+        if (qty > 0 && qty <= lowStockThreshold) {
+          return 'low';
+        }
+      }
+      return 'in';
+    }
+
+    // Missing or unexpected stock_status: fall back to quantity.
     if (stockQuantity != null) {
       final qty = stockQuantity!;
       if (qty <= 0) return 'out';
@@ -65,9 +87,6 @@ class Product {
       return 'in';
     }
 
-    // Fallback to WooCommerce stock_status.
-    final status = stockStatus.toLowerCase();
-    if (status == 'outofstock') return 'out';
     return 'in';
   }
 
